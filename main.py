@@ -4,7 +4,7 @@ import sqlite3
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 
-TOKEN = "8613160282:AAEPRTs88YKrzvUuJF0sNJlgeVAk-TYnYSE"
+TOKEN = "ТВІЙ_ТОКЕН_БОТА"
 OWNER_ID = 5506402566
 
 logging.basicConfig(level=logging.INFO)
@@ -176,7 +176,7 @@ async def handle_messages(message: types.Message):
     for support_id in team:
         try:
             # Спочатку надсилаємо красиву інфо-картку про гравця
-            info_card = await bot.send_message(
+            await bot.send_message(
                 chat_id=support_id,
                 text=f"📥 **Нове звернення!**\n\n"
                      f"👤 **Гравець:** {message.from_user.mention_html()}\n"
@@ -195,7 +195,8 @@ async def handle_messages(message: types.Message):
 
     await message.answer("📬 Ваше повідомлення передано команді підтримки Ukraine Legacy!")
 
-async main():
+# --- ЗАПУСК БОТА ---
+async def main():
     print("Бот підтримки [SQLite + Анонімність] успішно запущений!")
     await dp.start_polling(bot)
 
