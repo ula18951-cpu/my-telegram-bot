@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import sqlite3
+import time
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 
@@ -11,23 +12,21 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+# Словник для анти-спаму (зберігає час останнього повідомлення користувача)
+last_message_time = {}
+ANTI_SPAM_DELAY = 3.0  # Затримка в секундах між повідомленнями від одного гравця
+
 # --- РОБОТА З БАЗОЮ ДАНИХ (SQLite) ---
 def init_db():
     conn = sqlite3.connect("support_bot.db")
     cursor = conn.cursor()
-    # Таблиця для команди підтримки
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS support_team (
-            user_id INTEGER PRIMARY KEY
-        )
-    """)
-    # Таблиця для зв'язку повідомлень (Тікетів)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS tickets (
-            support_msg_id INTEGER PRIMARY KEY,
-            client_user_id INTEGER
-        )
-    """)
+    # Таблиця підтримки
+    cursor.execute("CREATE TABLE IF NOT EXISTS support_team (user_id INTEGER PRIMARY KEY)")
+    # Таблиця тікетів
+    cursor.execute("CREATE TABLE IF NOT EXISTS tickets (support_msg_id INTEGER PRIMARY KEY, client_user_id INTEGER)")
+    # Таблиця чорного списку (БАН)
+    cursor.execute("CREATE TABLE IF NOT EXISTS blacklist (user_id INTEGER PRIMARY KEY)")
+    
     # Додаємо власника за замовчуванням
     cursor.execute("INSERT OR IGNORE INTO support_team (user_id) VALUES (?)", (OWNER_ID,))
     conn.commit()
@@ -77,7 +76,29 @@ def delete_ticket_from_db(client_user_id: int):
     conn.commit()
     conn.close()
 
-# Ініціалізуємо БД при старті
+# Функції чорного списку
+def ban_user_in_db(user_id: int):
+    conn = sqlite3.connect("support_bot.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO blacklist (user_id) VALUES (?)", (user_id,))
+    conn.commit()
+    conn.close()
+
+def unban_user_in_db(user_id: int):
+    conn = sqlite3.connect("support_bot.db")
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM blacklist WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def is_user_banned(user_id: int) -> bool:
+    conn = sqlite3.connect("support_bot.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM blacklist WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None
+
 init_db()
 
 # --- КЛАВІАТУРИ ---
@@ -123,6 +144,31 @@ async def remove_support_user(message: types.Message):
     except (IndexError, ValueError):
         await message.reply("❌ Формат:\n`/rem_support ID`", parse_mode="Markdown")
 
+@dp.message(Command("ban_user"))
+async def ban_user_cmd(message: types.Message):
+    if message.from_user.id not in get_support_team():
+        return
+    try:
+        b_id = int(message.text.split()[1])
+        if b_id in get_support_team():
+            return await message.reply("❌ Не можна забанити адміна/підтримку!")
+        ban_user_in_db(b_id)
+        delete_ticket_from_db(b_id)  # Очищаємо активні тікети
+        await message.reply(f"🚫 Гравця `{b_id}` успішно забанено в боті. Його повідомлення більше не прийдуть.", parse_mode="Markdown")
+    except (IndexError, ValueError):
+        await message.reply("❌ Формат:\n`/ban_user ID`", parse_mode="Markdown")
+
+@dp.message(Command("unban_user"))
+async def unban_user_cmd(message: types.Message):
+    if message.from_user.id not in get_support_team():
+        return
+    try:
+        b_id = int(message.text.split()[1])
+        unban_user_in_db(b_id)
+        await message.reply(f"🟢 Гравця `{b_id}` успішно розбанено.", parse_mode="Markdown")
+    except (IndexError, ValueError):
+        await message.reply("❌ Формат:\n`/unban_user ID`", parse_mode="Markdown")
+
 @dp.message(Command("support_list"))
 async def list_support(message: types.Message):
     if message.from_user.id not in get_support_team():
@@ -135,12 +181,16 @@ async def list_support(message: types.Message):
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
+    if is_user_banned(message.from_user.id):
+        return  # Повністю ігноруємо забанених
+        
     if message.from_user.id in get_support_team():
         await message.reply(
             f"👋 Вітаємо в робочій панелі, {message.from_user.first_name}!\n\n"
-            "База даних підключена. Чекайте на звернення гравців.\n"
-            "• Для відповіді: використовуйте `Reply`.\n"
-            "• Для закриття: натисніть кнопку під постом або зробіть `Reply` з текстом `/close`."
+            "Захист від спаму активований.\n"
+            "• `/ban_user ID` — забанити спамера.\n"
+            "• `/unban_user ID` — розбанити.\n"
+            "• Для відповіді використовуйте `Reply`."
         )
         return
 
@@ -153,6 +203,9 @@ async def cmd_start(message: types.Message):
 
 @dp.callback_query(F.data.startswith("btn_"))
 async def handle_menu_buttons(callback: types.CallbackQuery):
+    if is_user_banned(callback.from_user.id):
+        return await callback.answer("🚨 Ви заблоковані у цьому боті!", show_alert=True)
+    
     action = callback.data
     texts = {
         "btn_play": "🚀 **Як почати грати:**\n\n1. Перейди на наш сайт.\n2. Завантаж офіційний лаунчер.\n3. Слідуй інструкціям!",
@@ -163,7 +216,7 @@ async def handle_menu_buttons(callback: types.CallbackQuery):
     await callback.message.answer(texts.get(action, "Помилка"), parse_mode="Markdown")
     await callback.answer()
 
-# --- ОБРОБКА ЗАКРИТТЯ ТІКЕТУ ЧЕРЕЗ КНОПКУ ---
+# --- ОБРОБКА ЗАКРИТТЯ ТІКЕТУ ---
 
 @dp.callback_query(F.data.startswith("close_"))
 async def handle_close_ticket_btn(callback: types.CallbackQuery):
@@ -172,66 +225,72 @@ async def handle_close_ticket_btn(callback: types.CallbackQuery):
         return await callback.answer("❌ Ви не є агентом підтримки!", show_alert=True)
 
     client_id = int(callback.data.split("_")[1])
-    
     try:
         await bot.send_message(
             chat_id=client_id,
-            text="🔒 **Ваш тікет було закрито адміністратором.**\nДякуємо за звернення! Якщо виникнуть нові питання — пишіть знову.",
+            text="🔒 **Ваш тікет було закрито адміністратором.**\nДякуємо за звернення!",
             parse_mode="Markdown"
         )
     except Exception:
         pass
 
     delete_ticket_from_db(client_id)
-
     await callback.message.edit_text(
         text=f"{callback.message.text}\n\n🛑 **Тікет закрито через кнопку адміном {callback.from_user.first_name}**",
         reply_markup=None
     )
     await callback.answer("✅ Тікет закритий!")
 
-# --- СИСТЕМА ТІКЕТІВ З АНОНІМНІСТЮ ---
+# --- СИСТЕМА ТІКЕТІВ З АНТИ-СПАМОМ ТА БАНОМ ---
 
 @dp.message(F.chat.type == "private")
 async def handle_messages(message: types.Message):
     user_id = message.from_user.id
     team = get_support_team()
 
-    # 1. Робота оператора (Відповідь або Закриття командою /close)
+    # Перевірка на бан
+    if is_user_banned(user_id):
+        return
+
+    # 1. Робота оператора
     if user_id in team:
         if message.reply_to_message:
             client_id = get_client_by_msg(message.reply_to_message.message_id)
             if client_id:
-                # ПЕРЕВІРКА НА КОМАНДУ ЗАКРИТТЯ
                 if message.text and message.text.strip() == "/close":
                     try:
-                        await bot.send_message(
-                            chat_id=client_id,
-                            text="🔒 **Ваш тікет було закрито адміністратором.**\nДякуємо за звернення! Якщо виникнуть нові питання — пишіть знову.",
-                            parse_mode="Markdown"
-                        )
+                        await bot.send_message(chat_id=client_id, text="🔒 **Ваш тікет було закрито адміністратором.**", parse_mode="Markdown")
                     except Exception:
                         pass
                     delete_ticket_from_db(client_id)
-                    await message.reply(f"🛑 Тікет успішно закрито командою (адмін: {message.from_user.first_name}).")
+                    await message.reply(f"🛑 Тікет успішно закрито командою.")
                     return
                 
-                # ЗВИЧАЙНА ВІДПОВІДЬ ГРАВЦЮ
                 try:
                     await message.copy_to(chat_id=client_id)
                     await message.reply("🎯 Відповідь надіслана гравцю.")
                 except Exception as e:
                     await message.reply(f"❌ Помилка відправки: {e}")
             else:
-                await message.reply("⚠️ Не вдалося знайти активний тікет. Можливо, його вже закрито кнопкою.")
+                await message.reply("⚠️ Активний тікет не знайдено (можливо закритий чи гравець у бані).")
         else:
-            await message.reply("⚠️ Використовуй кнопку `Reply` (Відповісти) на повідомлення гравця!")
+            await message.reply("⚠️ Використовуй кнопку `Reply` для відповіді!")
         return
 
-    # 2. Звернення від гравця
+    # 2. АНТИ-СПАМ ФІЛЬТР ДЛЯ ГРАВЦІВ
+    current_time = time.time()
+    if user_id in last_message_time:
+        time_passed = current_time - last_message_time[user_id]
+        if time_passed < ANTI_SPAM_DELAY:
+            # Гравець пише занадто часто — просто ігноримо повідомлення, не забиваючи консоль адмінам
+            return
+    
+    # Оновлюємо час останнього повідомлення користувача
+    last_message_time[user_id] = current_time
+
+    # 3. Пересилка звернення від гравця
     for support_id in team:
         try:
-            # Надсилаємо інфо-картку
             await bot.send_message(
                 chat_id=support_id,
                 text=f"📥 **Нове звернення!**\n\n"
@@ -240,15 +299,11 @@ async def handle_messages(message: types.Message):
                      f"✍️ **Повідомлення нижче:**",
                 parse_mode="HTML"
             )
-            # Пересилаємо питання з інлайн-кнопкою закриття
             user_msg = await message.copy_to(
                 chat_id=support_id,
                 reply_markup=get_close_ticket_keyboard(user_id)
             )
-            
-            # Зберігаємо зв'язок повідомлення в БД
             save_ticket(user_msg.message_id, user_id)
-            
         except Exception:
             continue
 
@@ -256,7 +311,7 @@ async def handle_messages(message: types.Message):
 
 # --- ЗАПУСК БОТА ---
 async def main():
-    print("Бот підтримки [SQLite + Комбо Закриття] успішно запущений!")
+    print("Бот підтримки [SQLite + АНТИ-СПАМ + БАН СИСТЕМА] успішно запущений!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
