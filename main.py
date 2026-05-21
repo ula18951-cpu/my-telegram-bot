@@ -4,7 +4,7 @@ import sqlite3
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 
-TOKEN = "ТВІЙ_ТОКЕН_БОТА"
+TOKEN = "8584377554:AAF6eRRF4t4daiCAPanx1IwJAlT_59fbkIQ"
 OWNER_ID = 5506402566
 
 logging.basicConfig(level=logging.INFO)
