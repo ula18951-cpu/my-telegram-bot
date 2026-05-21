@@ -70,6 +70,13 @@ def get_client_by_msg(support_msg_id: int):
     conn.close()
     return row[0] if row else None
 
+def delete_ticket_from_db(client_user_id: int):
+    conn = sqlite3.connect("support_bot.db")
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM tickets WHERE client_user_id = ?", (client_user_id,))
+    conn.commit()
+    conn.close()
+
 # Ініціалізуємо БД при старті
 init_db()
 
@@ -81,6 +88,12 @@ def get_main_keyboard():
         [types.InlineKeyboardButton(text="🛠️ Технічна допомога", callback_data="btn_tech")],
         [types.InlineKeyboardButton(text="🆘 Зв'язок з Адміністрацією", callback_data="btn_contact")],
         [types.InlineKeyboardButton(text="🌐 Наш сайт", url="https://ukrainelegacy.netlify.app/")]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=kb)
+
+def get_close_ticket_keyboard(client_id: int):
+    kb = [
+        [types.InlineKeyboardButton(text="❌ Закрити тікет", callback_data=f"close_{client_id}")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=kb)
 
@@ -125,7 +138,9 @@ async def cmd_start(message: types.Message):
     if message.from_user.id in get_support_team():
         await message.reply(
             f"👋 Вітаємо в робочій панелі, {message.from_user.first_name}!\n\n"
-            "База даних підключена. Чекайте на звернення гравців. Для відповіді використовуйте `Reply`."
+            "База даних підключена. Чекайте на звернення гравців.\n"
+            "• Для відповіді: використовуйте `Reply`.\n"
+            "• Для закриття: натисніть кнопку під постом або зробіть `Reply` з текстом `/close`."
         )
         return
 
@@ -148,6 +163,33 @@ async def handle_menu_buttons(callback: types.CallbackQuery):
     await callback.message.answer(texts.get(action, "Помилка"), parse_mode="Markdown")
     await callback.answer()
 
+# --- ОБРОБКА ЗАКРИТТЯ ТІКЕТУ ЧЕРЕЗ КНОПКУ ---
+
+@dp.callback_query(F.data.startswith("close_"))
+async def handle_close_ticket_btn(callback: types.CallbackQuery):
+    team = get_support_team()
+    if callback.from_user.id not in team:
+        return await callback.answer("❌ Ви не є агентом підтримки!", show_alert=True)
+
+    client_id = int(callback.data.split("_")[1])
+    
+    try:
+        await bot.send_message(
+            chat_id=client_id,
+            text="🔒 **Ваш тікет було закрито адміністратором.**\nДякуємо за звернення! Якщо виникнуть нові питання — пишіть знову.",
+            parse_mode="Markdown"
+        )
+    except Exception:
+        pass
+
+    delete_ticket_from_db(client_id)
+
+    await callback.message.edit_text(
+        text=f"{callback.message.text}\n\n🛑 **Тікет закрито через кнопку адміном {callback.from_user.first_name}**",
+        reply_markup=None
+    )
+    await callback.answer("✅ Тікет закритий!")
+
 # --- СИСТЕМА ТІКЕТІВ З АНОНІМНІСТЮ ---
 
 @dp.message(F.chat.type == "private")
@@ -155,27 +197,41 @@ async def handle_messages(message: types.Message):
     user_id = message.from_user.id
     team = get_support_team()
 
-    # 1. Відповідь оператора
+    # 1. Робота оператора (Відповідь або Закриття командою /close)
     if user_id in team:
         if message.reply_to_message:
             client_id = get_client_by_msg(message.reply_to_message.message_id)
             if client_id:
+                # ПЕРЕВІРКА НА КОМАНДУ ЗАКРИТТЯ
+                if message.text and message.text.strip() == "/close":
+                    try:
+                        await bot.send_message(
+                            chat_id=client_id,
+                            text="🔒 **Ваш тікет було закрито адміністратором.**\nДякуємо за звернення! Якщо виникнуть нові питання — пишіть знову.",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
+                    delete_ticket_from_db(client_id)
+                    await message.reply(f"🛑 Тікет успішно закрито командою (адмін: {message.from_user.first_name}).")
+                    return
+                
+                # ЗВИЧАЙНА ВІДПОВІДЬ ГРАВЦЮ
                 try:
-                    # Надсилаємо копію повідомлення гравцю анонімно
                     await message.copy_to(chat_id=client_id)
                     await message.reply("🎯 Відповідь надіслана гравцю.")
                 except Exception as e:
                     await message.reply(f"❌ Помилка відправки: {e}")
             else:
-                await message.reply("⚠️ Не вдалося знайти автора цього тікету в базі даних.")
+                await message.reply("⚠️ Не вдалося знайти активний тікет. Можливо, його вже закрито кнопкою.")
         else:
-            await message.reply("⚠️ Використовуй кнопку `Reply` (Відповісти) на картку тікету!")
+            await message.reply("⚠️ Використовуй кнопку `Reply` (Відповісти) на повідомлення гравця!")
         return
 
     # 2. Звернення від гравця
     for support_id in team:
         try:
-            # Спочатку надсилаємо красиву інфо-картку про гравця
+            # Надсилаємо інфо-картку
             await bot.send_message(
                 chat_id=support_id,
                 text=f"📥 **Нове звернення!**\n\n"
@@ -184,10 +240,13 @@ async def handle_messages(message: types.Message):
                      f"✍️ **Повідомлення нижче:**",
                 parse_mode="HTML"
             )
-            # Пересилаємо саме повідомлення або скріншот
-            user_msg = await message.copy_to(chat_id=support_id)
+            # Пересилаємо питання з інлайн-кнопкою закриття
+            user_msg = await message.copy_to(
+                chat_id=support_id,
+                reply_markup=get_close_ticket_keyboard(user_id)
+            )
             
-            # Прив'язуємо копію повідомлення до ID клієнта в БД
+            # Зберігаємо зв'язок повідомлення в БД
             save_ticket(user_msg.message_id, user_id)
             
         except Exception:
@@ -197,7 +256,7 @@ async def handle_messages(message: types.Message):
 
 # --- ЗАПУСК БОТА ---
 async def main():
-    print("Бот підтримки [SQLite + Анонімність] успішно запущений!")
+    print("Бот підтримки [SQLite + Комбо Закриття] успішно запущений!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
